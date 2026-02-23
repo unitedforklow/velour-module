@@ -219,10 +219,10 @@ end
 local legitConn  = nil
 local mouseDown  = false
 
-local aimActive     = false   -- активен ли прямо сейчас
-local toggleState   = false   -- текущий Toggle-статус
-local stickyTarget  = nil     -- залипшая цель (Player)
-local stickyPos     = nil     -- последняя позиция залипшей цели
+local aimActive     = false  
+local toggleState   = false  
+local stickyTarget  = nil    
+local stickyPos     = nil     
 
 local fovCircle = Drawing.new("Circle")
 fovCircle.Visible      = false
