@@ -2,11 +2,11 @@
 -- https://raw.githubusercontent.com/unitedforklow/velour-module/refs/heads/main/module.luau
 -- ============================================================
 
-local Players         = game:GetService("Players")
-local RunService      = game:GetService("RunService")
-local UserInputService= game:GetService("UserInputService")
-local Camera          = workspace.CurrentCamera
-local LocalPlayer     = Players.LocalPlayer
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Camera           = workspace.CurrentCamera
+local LocalPlayer      = Players.LocalPlayer
 
 local ESP = {}
 
@@ -34,24 +34,29 @@ ESP.Config = {
     MaxRenderDist = 500,
 
     -- ── LEGIT ────────────────────────────────────────────────
-    -- Aimbot
-    AimbotEnabled   = false,
-    AutoFire        = false,
-    VisibleCheck    = true,
-    FOVRadius       = 90,
-    Smooth          = 6,  -- (from 1 instant to 20 really smooth)
+    AimbotEnabled = false,
+    FOVEnabled    = false,                     -- show FOV
+    FOVRadius     = 90,                        -- radius in pixels
+    AutoFire      = false,
+    VisibleCheck  = true,
+    StickyAim     = false,                     -- hold target not in fov
+    Smooth        = 6,                         -- 1 = instant, 20 = smooth
+
+    AimKeybind    = Enum.KeyCode.RightControl, -- activation button
+    AimMethod     = "Hold",                    -- "Hold" | "Toggle"
+    AimPart       = "Head",                    -- "Head"|"HumanoidRootPart"|"Torso"|"LeftArm"|"RightArm"
 
     -- Prediction
-    BulletDrop      = false,  -- gravity comps
-    PingOffset      = 0,      -- milliseconds
+    BulletDrop    = false,
+    PingOffset    = 0,
 }
 
 -- ════════════════════════════════════════════════════════════
--- ── ESP ────────────────────────────────────────
+-- ── ESP ─────────────────────────────────────────────────────
 -- ════════════════════════════════════════════════════════════
 
-local drawings   = {}
-local espConn    = nil
+local drawings = {}
+local espConn  = nil
 
 local function project(worldPos)
     local s, onScreen = Camera:WorldToViewportPoint(worldPos)
@@ -185,11 +190,11 @@ local function render()
             local ratio   = humanoid.MaxHealth > 0
                             and math.clamp(humanoid.Health / humanoid.MaxHealth, 0, 1) or 0
             local barX    = boxLeft + boxWidth + cfg.BarOffsetX
-            d.bar.Visible  = true
+            d.bar.Visible   = true
             d.bar.Thickness = cfg.BarWidth
-            d.bar.From     = Vector2.new(barX, boxBottom)
-            d.bar.To       = Vector2.new(barX, boxBottom - boxHeight * ratio)
-            d.bar.Color    = Color3.new(1 - ratio, ratio, 0)
+            d.bar.From      = Vector2.new(barX, boxBottom)
+            d.bar.To        = Vector2.new(barX, boxBottom - boxHeight * ratio)
+            d.bar.Color     = Color3.new(1 - ratio, ratio, 0)
         else
             d.bar.Visible = false
         end
@@ -211,139 +216,233 @@ end
 -- ── LEGIT ENGINE ─────────────────────────────────────────────
 -- ════════════════════════════════════════════════════════════
 
-local legitConn   = nil
-local mouseDown   = false
+local legitConn  = nil
+local mouseDown  = false
 
-local function getClosestTarget()
-    local cfg        = ESP.Config
-    local vp         = Camera.ViewportSize
-    local screenCenter = Vector2.new(vp.X / 2, vp.Y / 2)
+local aimActive     = false   -- активен ли прямо сейчас
+local toggleState   = false   -- текущий Toggle-статус
+local stickyTarget  = nil     -- залипшая цель (Player)
+local stickyPos     = nil     -- последняя позиция залипшей цели
 
-    local bestPlayer  = nil
-    local bestDist    = math.huge
-    local bestHeadPos = nil
+local fovCircle = Drawing.new("Circle")
+fovCircle.Visible      = false
+fovCircle.Filled       = false
+fovCircle.Color        = Color3.fromRGB(255, 255, 255)
+fovCircle.Thickness    = 1
+fovCircle.Transparency = 0.6
+fovCircle.NumSides     = 64
+fovCircle.ZIndex       = 10
 
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player == LocalPlayer then continue end
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
 
-        local sameTeam = (LocalPlayer.Team ~= nil)
-                      and (player.Team == LocalPlayer.Team)
-        if sameTeam then continue end
-
-        local char = player.Character
-        local head = char and char:FindFirstChild("Head")
-        local hum  = char and char:FindFirstChildOfClass("Humanoid")
-
-        if not (head and hum) then continue end
-        if hum.Health <= 0    then continue end
-
-        local screenPos, depth, onScreen =
-            Camera:WorldToViewportPoint(head.Position)
-
-        if not onScreen or depth <= 0 then continue end
-
-        local screenVec  = Vector2.new(screenPos.X, screenPos.Y)
-        local distPixels = (screenVec - screenCenter).Magnitude
-
-        if distPixels > cfg.FOVRadius then continue end
-
-        if cfg.VisibleCheck then
-            local origin    = Camera.CFrame.Position
-            local direction = head.Position - origin
-
-            local rayParams = RaycastParams.new()
-            rayParams.FilterType = Enum.RaycastFilterType.Exclude
-
-            local chars = {}
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p.Character then
-                    table.insert(chars, p.Character)
-                end
-            end
-            rayParams.FilterDescendantsInstances = chars
-
-            local result = workspace:Raycast(origin, direction, rayParams)
-            if result then continue end
-        end
-
-        if distPixels < bestDist then
-            bestDist    = distPixels
-            bestPlayer  = player
-            bestHeadPos = head.Position
-        end
-    end
-
-    return bestPlayer, bestHeadPos
-end
-
-local function smoothAim(targetWorldPos)
-    local cfg      = ESP.Config
-    local origin   = Camera.CFrame.Position
-
-    -- BulletDrop
-    local aimPos = targetWorldPos
-    if cfg.BulletDrop then
-        local dist   = (targetWorldPos - origin).Magnitude
-        local offset = dist * dist * 0.002
-        aimPos = targetWorldPos + Vector3.new(0, offset, 0)
-    end
-
-    -- PingOffset ms → secs → dots on velocity.
-    if cfg.PingOffset > 0 then
-        local char     = nil
-        local rootPart = nil
-        -- rootpart
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p.Character and p.Character:FindFirstChild("Head") then
-                local h = p.Character.Head
-                if h.Position == targetWorldPos or
-                   (h.Position - targetWorldPos).Magnitude < 2 then
-                    rootPart = p.Character:FindFirstChild("HumanoidRootPart")
-                    break
-                end
-            end
-        end
-        if rootPart then
-            local pingSeconds = cfg.PingOffset / 1000
-            local velocity    = rootPart.AssemblyLinearVelocity
-            aimPos = aimPos + velocity * pingSeconds
-        end
-    end
-
-    local targetCFrame = CFrame.lookAt(origin, aimPos)
-    local factor       = math.clamp(1 / cfg.Smooth, 0.05, 1)
-    Camera.CFrame      = Camera.CFrame:Lerp(targetCFrame, factor)
-end
-
-local function legitimLoop()
-    local cfg = ESP.Config
-    if not cfg.AimbotEnabled then return end
-
-    local _, headPos = getClosestTarget()
-    if not headPos then return end
-
-    smoothAim(headPos)
-
-    if cfg.AutoFire and not mouseDown then
-        if mouse1click then
-            mouse1click()
-        end
-    end
-end
-
-UserInputService.InputBegan:Connect(function(input)
+    -- LMB для AutoFire
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
         mouseDown = true
     end
+
+    -- Keybind
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if input.KeyCode ~= ESP.Config.AimKeybind then return end
+    if not ESP.Config.AimbotEnabled then return end
+
+    if ESP.Config.AimMethod == "Hold" then
+        aimActive = true
+
+    elseif ESP.Config.AimMethod == "Toggle" then
+        toggleState = not toggleState
+        aimActive   = toggleState
+        if not aimActive then
+            stickyTarget = nil
+            stickyPos    = nil
+        end
+    end
 end)
+
 UserInputService.InputEnded:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
         mouseDown = false
     end
+
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    if input.KeyCode ~= ESP.Config.AimKeybind then return end
+
+    if ESP.Config.AimMethod == "Hold" then
+        aimActive    = false
+        stickyTarget = nil
+        stickyPos    = nil
+    end
 end)
 
+local PART_FALLBACKS = {
+    Torso    = { "UpperTorso",    "LowerTorso",  "Torso"     },
+    LeftArm  = { "LeftUpperArm",  "Left Arm"                 },
+    RightArm = { "RightUpperArm", "Right Arm"                },
+}
+
+local function getPartPosition(character)
+    local partName = ESP.Config.AimPart or "Head"
+    local part     = character:FindFirstChild(partName)
+
+    if not part then
+        local fallbacks = PART_FALLBACKS[partName]
+        if fallbacks then
+            for _, name in ipairs(fallbacks) do
+                part = character:FindFirstChild(name)
+                if part then break end
+            end
+        end
+    end
+
+    if not part then
+        part = character:FindFirstChild("HumanoidRootPart")
+    end
+
+    return part and part.Position or nil
+end
+
+local function getTarget()
+    local cfg          = ESP.Config
+    local vp           = Camera.ViewportSize
+    local screenCenter = Vector2.new(vp.X / 2, vp.Y / 2)
+
+    if cfg.StickyAim and stickyTarget then
+        local char    = stickyTarget.Character
+        local hum     = char and char:FindFirstChildOfClass("Humanoid")
+        local partPos = char and getPartPosition(char)
+
+        if hum and hum.Health > 0 and partPos then
+            stickyPos = partPos
+            return stickyTarget, partPos
+        else
+            stickyTarget = nil
+            stickyPos    = nil
+        end
+    end
+
+    local bestPlayer = nil
+    local bestDist   = math.huge
+    local bestPos    = nil
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+
+        -- Team filter
+        if LocalPlayer.Team ~= nil and player.Team == LocalPlayer.Team then
+            continue
+        end
+
+        local char    = player.Character
+        local hum     = char and char:FindFirstChildOfClass("Humanoid")
+        local partPos = char and getPartPosition(char)
+
+        if not (char and hum and partPos) then continue end
+        if hum.Health <= 0              then continue end
+
+        -- Proj
+        local sp, depth, onScreen = Camera:WorldToViewportPoint(partPos)
+        if not onScreen or depth <= 0 then continue end
+
+        local distPixels = (Vector2.new(sp.X, sp.Y) - screenCenter).Magnitude
+        if distPixels > cfg.FOVRadius then continue end
+
+        -- VisibleCheck
+        if cfg.VisibleCheck then
+            local origin = Camera.CFrame.Position
+            local dir    = partPos - origin
+
+            local rp = RaycastParams.new()
+            rp.FilterType = Enum.RaycastFilterType.Exclude
+            local chars = {}
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p.Character then table.insert(chars, p.Character) end
+            end
+            rp.FilterDescendantsInstances = chars
+
+            if workspace:Raycast(origin, dir, rp) then continue end
+        end
+
+        if distPixels < bestDist then
+            bestDist   = distPixels
+            bestPlayer = player
+            bestPos    = partPos
+        end
+    end
+
+    -- StickyAim
+    if bestPlayer and cfg.StickyAim then
+        stickyTarget = bestPlayer
+        stickyPos    = bestPos
+    end
+
+    return bestPlayer, bestPos
+end
+
+local function smoothAim(targetPos)
+    local cfg    = ESP.Config
+    local origin = Camera.CFrame.Position
+    local aimPos = targetPos
+
+    -- BulletDrop
+    if cfg.BulletDrop then
+        local dist = (targetPos - origin).Magnitude
+        aimPos = targetPos + Vector3.new(0, dist * dist * 0.002, 0)
+    end
+
+    -- PingOffset
+    if cfg.PingOffset > 0 then
+        for _, p in ipairs(Players:GetPlayers()) do
+            local char = p.Character
+            if not char then continue end
+            local part = char:FindFirstChild(cfg.AimPart or "Head")
+                      or char:FindFirstChild("HumanoidRootPart")
+            if part and (part.Position - targetPos).Magnitude < 3 then
+                local root = char:FindFirstChild("HumanoidRootPart")
+                if root then
+                    aimPos = aimPos + root.AssemblyLinearVelocity * (cfg.PingOffset / 1000)
+                end
+                break
+            end
+        end
+    end
+
+    local factor = math.clamp(1 / cfg.Smooth, 0.05, 1)
+    Camera.CFrame = Camera.CFrame:Lerp(CFrame.lookAt(origin, aimPos), factor)
+end
+
+local function legitimLoop()
+    local cfg = ESP.Config
+
+    -- ── FOV circle ─────────────────────────────────────────
+    if cfg.FOVEnabled then
+        local vp           = Camera.ViewportSize
+        fovCircle.Visible  = true
+        fovCircle.Position = Vector2.new(vp.X / 2, vp.Y / 2)
+        fovCircle.Radius   = cfg.FOVRadius
+        -- Цвет: фиолетовый при активном аиме, белый в покое
+        fovCircle.Color        = aimActive
+            and Color3.fromRGB(169, 144, 255)
+            or  Color3.fromRGB(220, 220, 220)
+        fovCircle.Transparency = aimActive and 0.25 or 0.6
+    else
+        fovCircle.Visible = false
+    end
+
+    -- ── Aimbot ─────────────────────────────────────────────
+    if not cfg.AimbotEnabled or not aimActive then return end
+
+    local _, partPos = getTarget()
+    if not partPos then return end
+
+    smoothAim(partPos)
+
+    if cfg.AutoFire and not mouseDown then
+        if mouse1click then mouse1click() end
+    end
+end
+
 -- ════════════════════════════════════════════════════════════
--- PUBLIC
+-- PUBLIC API
 -- ════════════════════════════════════════════════════════════
 
 function ESP:Start()
@@ -355,10 +454,7 @@ function ESP:Start()
     end)
     Players.PlayerRemoving:Connect(removeDrawings)
 
-    -- ESP render
-    espConn = RunService.RenderStepped:Connect(render)
-
-    -- Legit engine
+    espConn   = RunService.RenderStepped:Connect(render)
     legitConn = RunService.RenderStepped:Connect(legitimLoop)
 end
 
@@ -366,6 +462,7 @@ function ESP:Stop()
     if espConn   then espConn:Disconnect();   espConn   = nil end
     if legitConn then legitConn:Disconnect(); legitConn = nil end
     for player in pairs(drawings) do removeDrawings(player) end
+    fovCircle.Visible = false
 end
 
 return ESP
