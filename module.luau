@@ -2,14 +2,20 @@
 -- https://raw.githubusercontent.com/unitedforklow/velour-module/refs/heads/main/module.luau
 -- ============================================================
 
-local Players    = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Camera     = workspace.CurrentCamera
-local LocalPlayer = Players.LocalPlayer
+local Players         = game:GetService("Players")
+local RunService      = game:GetService("RunService")
+local UserInputService= game:GetService("UserInputService")
+local Camera          = workspace.CurrentCamera
+local LocalPlayer     = Players.LocalPlayer
 
 local ESP = {}
 
+-- ════════════════════════════════════════════════════════════
+-- CONFIG
+-- ════════════════════════════════════════════════════════════
+
 ESP.Config = {
+    -- ── ESP ─────────────────────────────────────────────────
     Enabled       = true,
     ShowName      = true,
     ShowTeamName  = true,
@@ -26,10 +32,26 @@ ESP.Config = {
     TeamOffsetY   = 2,
     DistOffsetY   = 4,
     MaxRenderDist = 500,
+
+    -- ── LEGIT ────────────────────────────────────────────────
+    -- Aimbot
+    AimbotEnabled   = false,
+    AutoFire        = false,
+    VisibleCheck    = true,
+    FOVRadius       = 90,
+    Smooth          = 6,  -- (from 1 instant to 20 really smooth)
+
+    -- Prediction
+    BulletDrop      = false,  -- gravity comps
+    PingOffset      = 0,      -- milliseconds
 }
 
+-- ════════════════════════════════════════════════════════════
+-- ── ESP (не изменено) ────────────────────────────────────────
+-- ════════════════════════════════════════════════════════════
+
 local drawings   = {}
-local connection = nil
+local espConn    = nil
 
 local function project(worldPos)
     local s, onScreen = Camera:WorldToViewportPoint(worldPos)
@@ -112,7 +134,7 @@ local function render()
         local sameTeam = (LocalPlayer.Team ~= nil) and (player.Team == LocalPlayer.Team)
         if sameTeam then hideAll(d); continue end
 
-        local rootPos           = rootPart.Position
+        local rootPos              = rootPart.Position
         local topScr, depth, onTop = project(rootPos + Vector3.new(0,  3.5, 0))
         local botScr, _,     onBot = project(rootPos + Vector3.new(0, -3.0, 0))
 
@@ -127,7 +149,6 @@ local function render()
         local boxLeft   = topScr.X - boxWidth / 2
         local color     = getTeamColor(player)
 
-        -- Box
         if cfg.ShowBox then
             d.box.Visible   = true
             d.box.Position  = Vector2.new(boxLeft, boxTop)
@@ -161,9 +182,9 @@ local function render()
         end
 
         if cfg.ShowHealthBar then
-            local ratio    = humanoid.MaxHealth > 0
-                             and math.clamp(humanoid.Health / humanoid.MaxHealth, 0, 1) or 0
-            local barX     = boxLeft + boxWidth + cfg.BarOffsetX
+            local ratio   = humanoid.MaxHealth > 0
+                            and math.clamp(humanoid.Health / humanoid.MaxHealth, 0, 1) or 0
+            local barX    = boxLeft + boxWidth + cfg.BarOffsetX
             d.bar.Visible  = true
             d.bar.Thickness = cfg.BarWidth
             d.bar.From     = Vector2.new(barX, boxBottom)
@@ -186,6 +207,145 @@ local function render()
     end
 end
 
+-- ════════════════════════════════════════════════════════════
+-- ── LEGIT ENGINE ─────────────────────────────────────────────
+-- ════════════════════════════════════════════════════════════
+
+local legitConn   = nil
+local mouseDown   = false
+
+local function getClosestTarget()
+    local cfg        = ESP.Config
+    local vp         = Camera.ViewportSize
+    local screenCenter = Vector2.new(vp.X / 2, vp.Y / 2)
+
+    local bestPlayer  = nil
+    local bestDist    = math.huge
+    local bestHeadPos = nil
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+
+        local sameTeam = (LocalPlayer.Team ~= nil)
+                      and (player.Team == LocalPlayer.Team)
+        if sameTeam then continue end
+
+        local char = player.Character
+        local head = char and char:FindFirstChild("Head")
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+
+        if not (head and hum) then continue end
+        if hum.Health <= 0    then continue end
+
+        local screenPos, depth, onScreen =
+            Camera:WorldToViewportPoint(head.Position)
+
+        if not onScreen or depth <= 0 then continue end
+
+        local screenVec  = Vector2.new(screenPos.X, screenPos.Y)
+        local distPixels = (screenVec - screenCenter).Magnitude
+
+        if distPixels > cfg.FOVRadius then continue end
+
+        if cfg.VisibleCheck then
+            local origin    = Camera.CFrame.Position
+            local direction = head.Position - origin
+
+            local rayParams = RaycastParams.new()
+            rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+            local chars = {}
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p.Character then
+                    table.insert(chars, p.Character)
+                end
+            end
+            rayParams.FilterDescendantsInstances = chars
+
+            local result = workspace:Raycast(origin, direction, rayParams)
+            if result then continue end
+        end
+
+        if distPixels < bestDist then
+            bestDist    = distPixels
+            bestPlayer  = player
+            bestHeadPos = head.Position
+        end
+    end
+
+    return bestPlayer, bestHeadPos
+end
+
+local function smoothAim(targetWorldPos)
+    local cfg      = ESP.Config
+    local origin   = Camera.CFrame.Position
+
+    -- BulletDrop
+    local aimPos = targetWorldPos
+    if cfg.BulletDrop then
+        local dist   = (targetWorldPos - origin).Magnitude
+        local offset = dist * dist * 0.002   -- квадратичное смещение (physics)
+        aimPos = targetWorldPos + Vector3.new(0, offset, 0)
+    end
+
+    -- PingOffset ms → secs → dots on velocity.
+    if cfg.PingOffset > 0 then
+        local char     = nil
+        local rootPart = nil
+        -- rootpart
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p.Character and p.Character:FindFirstChild("Head") then
+                local h = p.Character.Head
+                if h.Position == targetWorldPos or
+                   (h.Position - targetWorldPos).Magnitude < 2 then
+                    rootPart = p.Character:FindFirstChild("HumanoidRootPart")
+                    break
+                end
+            end
+        end
+        if rootPart then
+            local pingSeconds = cfg.PingOffset / 1000
+            local velocity    = rootPart.AssemblyLinearVelocity
+            aimPos = aimPos + velocity * pingSeconds
+        end
+    end
+
+    local targetCFrame = CFrame.lookAt(origin, aimPos)
+    local factor       = math.clamp(1 / cfg.Smooth, 0.05, 1)
+    Camera.CFrame      = Camera.CFrame:Lerp(targetCFrame, factor)
+end
+
+local function legitimLoop()
+    local cfg = ESP.Config
+    if not cfg.AimbotEnabled then return end
+
+    local _, headPos = getClosestTarget()
+    if not headPos then return end
+
+    smoothAim(headPos)
+
+    if cfg.AutoFire and not mouseDown then
+        if mouse1click then
+            mouse1click()
+        end
+    end
+end
+
+UserInputService.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        mouseDown = true
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        mouseDown = false
+    end
+end)
+
+-- ════════════════════════════════════════════════════════════
+-- PUBLIC
+-- ════════════════════════════════════════════════════════════
+
 function ESP:Start()
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then createDrawings(player) end
@@ -194,11 +354,17 @@ function ESP:Start()
         if p ~= LocalPlayer then createDrawings(p) end
     end)
     Players.PlayerRemoving:Connect(removeDrawings)
-    connection = RunService.RenderStepped:Connect(render)
+
+    -- ESP render
+    espConn = RunService.RenderStepped:Connect(render)
+
+    -- Legit engine
+    legitConn = RunService.RenderStepped:Connect(legitimLoop)
 end
 
 function ESP:Stop()
-    if connection then connection:Disconnect(); connection = nil end
+    if espConn   then espConn:Disconnect();   espConn   = nil end
+    if legitConn then legitConn:Disconnect(); legitConn = nil end
     for player in pairs(drawings) do removeDrawings(player) end
 end
 
