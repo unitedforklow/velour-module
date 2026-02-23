@@ -284,7 +284,7 @@ local function smoothAim(targetWorldPos)
     local aimPos = targetWorldPos
     if cfg.BulletDrop then
         local dist   = (targetWorldPos - origin).Magnitude
-        local offset = dist * dist * 0.002   -- квадратичное смещение (physics)
+        local offset = dist * dist * 0.002
         aimPos = targetWorldPos + Vector3.new(0, offset, 0)
     end
 
